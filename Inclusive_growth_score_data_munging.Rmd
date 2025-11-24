@@ -18,9 +18,10 @@ library(data.table)
 # Testing read_csv
 For data
 ```{r}
-al_data <- fread("https://lehd.ces.census.gov/data/lodes/LODES8/al/wac/al_wac_S000_JT02_2022.csv.gz")[
-  , .SD, .SDcols = c("w_geocode", "C000", grep("^CFA", names(al_data), value = TRUE))
-]
+al_data <- fread("https://lehd.ces.census.gov/data/lodes/LODES8/al/wac/al_wac_S000_JT02_2022.csv.gz")
+al_data <- subset(al_data, select = c("w_geocode", "C000", grep("^CFA", names(al_data), value = TRUE)))
+
+al_data <- al_data[, .SD, .SDcols = c("w_geocode", "C000", grep("^CFA", names(al_data), value = TRUE))]
 
 ```
 
@@ -32,6 +33,8 @@ al_crosswalk <- fread("https://lehd.ces.census.gov/data/lodes/LODES8/al/al_xwalk
 ```
 Walking across
 ```{r}
+al_crosswalked <- al_data
+
 al_crosswalked <- inner_join(al_data, al_crosswalk, by = "w_geocode") |>
   group_by(trct, trctname, cbsa, cbsaname) |>
   summarize(across(C000:CFA05,sum))
