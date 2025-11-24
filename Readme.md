@@ -1,0 +1,1 @@
+This repository contains code and data used to creating a set of metrics to be used for Heartland Forward's work with the Inclusive Growth Score data from Mastercard
