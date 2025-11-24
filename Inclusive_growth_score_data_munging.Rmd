@@ -1,0 +1,39 @@
+#To do
+#1. For loop on data
+#2. second
+#3. calculate metrics
+    #a. YFES by tract for >100 employees
+    #b. What percentage of people live in a tract with YFES > nat'l average by region (Metro, Micro, State)
+
+    #calculate same metrics as before but only calculate it for tracts with at least 100 jobs in the tract (talk to will abt the metrics)
+
+---
+title: "Pulling LODES Data"
+---
+```{r}
+library(tidyverse)
+library(data.table)
+```
+
+# Testing read_csv
+For data
+```{r}
+al_data <- fread("https://lehd.ces.census.gov/data/lodes/LODES8/al/wac/al_wac_S000_JT02_2022.csv.gz")[
+  , .SD, .SDcols = c("w_geocode", "C000", grep("^CFA", names(al_data), value = TRUE))
+]
+
+```
+
+For crosswalk
+```{r}
+al_crosswalk <- fread("https://lehd.ces.census.gov/data/lodes/LODES8/al/al_xwalk.csv.gz")[
+    , .SD, .SDcols = c("tabblk2020", "trct", "trctname", "cbsa", "cbsaname")
+]
+```
+Walking across
+```{r}
+al_crosswalked <- inner_join(al_data, al_crosswalk, by = "w_geocode") |>
+  group_by(trct, trctname, cbsa, cbsaname) |>
+  summarize(across(C000:CFA05,sum))
+```
+
