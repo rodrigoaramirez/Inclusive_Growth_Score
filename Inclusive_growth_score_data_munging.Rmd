@@ -1,42 +1,434 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
 #To do
 #1. For loop on data
 #2. second
 #3. calculate metrics
-    #a. YFES by tract for >100 employees
-    #b. What percentage of people live in a tract with YFES > nat'l average by region (Metro, Micro, State)
+#a. YFES by tract for \>100 employees
+#b. What percentage of people live in a tract with YFES \> nat'l average by region (Metro, Micro, State)
 
-    #calculate same metrics as before but only calculate it for tracts with at least 100 jobs in the tract (talk to will abt the metrics)
+```         
+#calculate same metrics as before but only calculate it for tracts with at least 100 jobs in the tract (talk to will abt the metrics)
+```
 
 ---
 title: "Pulling LODES Data"
 ---
+
 ```{r}
-library(tidyverse)
+# clear environment and load required packages
+rm(list = ls())
+
 library(data.table)
+library(dplyr)
+library(readr) # needed for read_csv used later
 ```
 
 # Testing read_csv
+
 For data
+
 ```{r}
 al_data <- fread("https://lehd.ces.census.gov/data/lodes/LODES8/al/wac/al_wac_S000_JT02_2022.csv.gz")
-al_data <- subset(al_data, select = c("w_geocode", "C000", grep("^CFA", names(al_data), value = TRUE)))
 
-al_data <- al_data[, .SD, .SDcols = c("w_geocode", "C000", grep("^CFA", names(al_data), value = TRUE))]
+# Keep w_geocode (location), C000, and all CFA* columns
+al_data <- al_data[, c("w_geocode", "C000", grep("^CFA", names(al_data), value = TRUE)), with = FALSE]
 
 ```
 
 For crosswalk
-```{r}
-al_crosswalk <- fread("https://lehd.ces.census.gov/data/lodes/LODES8/al/al_xwalk.csv.gz")[
-    , .SD, .SDcols = c("tabblk2020", "trct", "trctname", "cbsa", "cbsaname")
-]
-```
-Walking across
-```{r}
-al_crosswalked <- al_data
 
-al_crosswalked <- inner_join(al_data, al_crosswalk, by = "w_geocode") |>
-  group_by(trct, trctname, cbsa, cbsaname) |>
-  summarize(across(C000:CFA05,sum))
+```{r}
+al_crosswalk <- fread("https://lehd.ces.census.gov/data/lodes/LODES8/al/al_xwalk.csv.gz")
+al_crosswalk <- al_crosswalk[, .(tabblk2020, trct, trctname, cbsa, cbsaname)]
 ```
+
+Walking across
+
+```{r}
+al_crosswalked <- al_data[al_crosswalk, on = c(w_geocode = "tabblk2020")]
+```
+
+running in parallel and data.table to save time
+```{r}
+library(data.table)
+library(future.apply)
+
+## 1. Set up data.table + parallel
+setDTthreads(1)              # each worker uses 1 thread; avoids wild oversubscription
+plan(multisession, workers = 6)  # adjust workers to your CPU
+
+## 2. Define states and years
+states <- c("al", "ak", "az", "ar", "ca", "co", "ct", "dc", "de", "fl", "ga",
+            "hi", "id", "il", "in", "ia", "ks", "ky", "la", "me", "md",
+            "ma", "mi", "mn", "ms", "mo", "mt", "ne", "nv", "nh", "nj",
+            "nm", "ny", "nc", "nd", "oh", "ok", "or", "pa", "ri", "sc",
+            "sd", "tn", "tx", "ut", "vt", "va", "wa", "wv", "wi", "wy")
+
+years <- 2011:2022
+
+combos <- expand.grid(
+  state = states,
+  year  = years,
+  stringsAsFactors = FALSE
+)
+
+template_url <- "https://lehd.ces.census.gov/data/lodes/LODES8/al/wac/al_wac_S000_JT02_2022.csv.gz"
+template <- fread(template_url, nrows = 0)
+
+## 3. Figure out which columns to keep (once)
+cfa_cols   <- grep("^CFA", names(template), value = TRUE)
+#cd_cols <- grep("^CD", names(template), value = TRUE)
+keep_cols  <- c("w_geocode", "C000", cfa_cols)
+
+## 4. Function to read one state-year in parallel
+read_one <- function(i) {
+  state <- combos$state[i]
+  year  <- combos$year[i]
+
+  url <- sprintf(
+    "https://lehd.ces.census.gov/data/lodes/LODES8/%s/wac/%s_wac_S000_JT02_%s.csv.gz",
+    state, state, year
+  )
+
+  tryCatch(
+    {
+      dt <- fread(url,
+                  select      = keep_cols,   # only needed columns
+                  showProgress = FALSE)
+
+      dt[, `:=`(state = state, year = year)]
+      dt
+    },
+    error = function(e) {
+      message("Skipping (missing/bad): ", url)
+      NULL
+    }
+  )
+}
+
+## 5. Parallel read across all combos
+lodes_list <- future_lapply(seq_len(nrow(combos)), read_one)
+
+## 6. Bind everything into one data.table (drop NULLs)
+lodes_data <- rbindlist(
+  lodes_list[!vapply(lodes_list, is.null, logical(1))],
+  use.names = TRUE,
+  fill      = TRUE
+)
+
+```
+
+for loop for crosswalks
+```{r}
+read_one_crosswalk <- function(i) {
+  state <- combos$state[i]
+  year  <- combos$year[i]
+
+  cw_url <- sprintf(
+    "https://lehd.ces.census.gov/data/lodes/LODES8/%s/%s_xwalk.csv.gz",
+    state, state
+)
+
+  tryCatch(
+    {
+      dt <- fread(cw_url, showProgress = FALSE)
+      dt <- dt[, .(tabblk2020, trct, trctname, cbsa, cbsaname)]
+      dt
+    },
+    error = function(e) {
+      message("Skipping: ", cw_url)
+      NULL
+    }
+  )
+}
+
+lodes_cw_list <- future_lapply(seq_len(length(states)), read_one_crosswalk)
+
+crosswalks <- rbindlist(
+  lodes_cw_list[!vapply(lodes_cw_list, is.null, logical(1))],
+  use.names = TRUE,
+  fill = TRUE
+)
+
+```
+
+walking across big time
+```{r}
+full_data <- lodes_data[crosswalks, on = c(w_geocode = "tabblk2020"), nomatch = NULL]
+
+fwrite(full_data, "data/LODES_data_by_block.csv")
+```
+
+#### Will's code translated ####
+
+```{r getting_igs_data}
+load_and_clean_igs_data <- function() {
+  igs <- fread(
+    "data/Inclusive_Growth_Score_Data_Export_11-09-2025_134916.csv",
+    colClasses = c(`Census Tract FIPS code` = "character")
+  )
+  
+  # Drop missing Year
+  igs <- igs[!is.na(Year)]
+  
+  # Keep 2019–2024, treat Year as character
+  igs[, Year := as.character(as.integer(Year))]
+  igs <- igs[Year %chin% as.character(2019:2024)]
+  
+  # Ensure 11-digit tract FIPS
+  igs[, `Census Tract FIPS code` :=
+        sprintf("%011s", `Census Tract FIPS code`)]
+  
+  # merge_year: 2024 → 2023, else same
+  igs[, merge_year := fifelse(Year == "2024", "2023", Year)]
+  
+  # Drop Puerto Rico
+  igs <- igs[State != "Puerto Rico"]
+  
+  # Drop rows where key new-business fields are NA
+  igs <- igs[
+    !is.na(`New Businesses Score`) &
+    !is.na(`New Businesses Base, %`) &
+    !is.na(`New Businesses Tract, %`)
+  ]
+  
+  # Keep subset of columns
+  igs <- igs[
+    ,
+    .(
+      `N/A`,
+      `Is an Opportunity Zone`,
+      `Census Tract FIPS code`,
+      County,
+      State,
+      merge_year,
+      Year,
+      `New Businesses Score`,
+      `New Businesses Base, %`,
+      `New Businesses Tract, %`
+    )
+  ]
+  
+  # greater_than_base flag
+  igs[,
+      greater_than_base :=
+        `New Businesses Tract, %` > `New Businesses Base, %`]
+  
+  igs[]
+}
+```
+
+
+```{r getting_MSA_data}
+load_msa_data <- function() {
+  msa_df <- openxlsx::read.xlsx("https://www2.census.gov/programs-surveys/metro-micro/geographies/reference-files/2023/delineation-files/list1_2023.xlsx", startRow = 3)
+  msa_dt <- as.data.table(msa_df)
+  
+  msa_cols <- c(
+    "CBSA.Code", "CBSA.Title",
+    "Metropolitan/Micropolitan.Statistical.Area",
+    "FIPS.State.Code", "FIPS.County.Code"
+  )
+  msa_dt <- msa_dt[, ..msa_cols]
+  
+  # Drop rows missing FIPS codes
+  msa_dt <- msa_dt[!is.na(`FIPS.State.Code`) & !is.na(`FIPS.County.Code`)]
+  
+  # Build zero-padded state/county FIPS and full county_fips_full
+  msa_dt[, state_fips  := sprintf("%02d", as.integer(`FIPS.State.Code`))]
+  msa_dt[, county_fips := sprintf("%03d", as.integer(`FIPS.County.Code`))]
+  msa_dt[, county_fips_full := paste0(state_fips, county_fips)]
+  
+  msa_dt[]
+}
+```
+
+
+```{r Merging IGS with population}
+merge_igs_pop <- function(igs_data, pop_data) {
+  igs_data[, merge_year := as.character(merge_year)]
+  pop_data[, merge_year := as.character(merge_year)]
+  
+  igs_data[, `Census Tract FIPS code` :=
+             as.character(`Census Tract FIPS code`)]
+  pop_data[, full_tract_fips := as.character(full_tract_fips)]
+  
+  # Left join: keep all igs_data rows, add population columns
+  # Use data.table style merge, but keep semantics close to Python all.x = TRUE
+  setkey(igs_data, merge_year, `Census Tract FIPS code`)
+  setkey(pop_data, merge_year, full_tract_fips)
+  merged <- pop_data[igs_data]   # x[ i ] with i = igs_data → keeps all igs rows
+  
+  # `population` is assumed to exist in pop_data
+  missing_pop <- merged[is.na(population), .N]
+  # (You can print or log missing_pop if you want)
+  
+  merged[is.na(population), population := 0]
+  
+  # Drop merge_year
+  merged[, merge_year := NULL]
+  
+  merged[, `Census Tract FIPS code` := as.character(full_tract_fips)]
+  
+  # county_fips = first 5 chars of tract FIPS
+  merged[, county_fips :=
+           substr(`Census Tract FIPS code`, 1, 5)]
+  
+  merged[]
+}
+```
+
+```{r merge with MSA data}
+
+merge_msa_data <- function(merged, msa_dt) {
+  # Unique county → MSA map
+  county_to_msa <- unique(
+    msa_dt[
+      ,
+      .(
+        county_fips_full,
+        `CBSA.Code`,
+        `CBSA.Title`,
+        `Metropolitan/Micropolitan.Statistical.Area`
+      )
+    ]
+  )
+  
+  # Left join: keep all merged rows, bring on CBSA info
+  # x = county_to_msa, i = merged  → result has rows of i (merged)
+  msa_merged <- county_to_msa[
+    merged,
+    on = .(county_fips_full = county_fips)
+  ]
+  
+  # Drop rows with missing CBSA Code
+  msa_merged <- msa_merged[!is.na(`CBSA.Code`)]
+  
+  # Keep subset of columns
+  msa_merged <- msa_merged[
+    ,
+    .(
+      `Census Tract FIPS code`,
+      `CBSA.Code`,
+      `CBSA.Title`,
+      `Metropolitan/Micropolitan.Statistical.Area`,
+      Year,
+      `New Businesses Base, %`,
+      `New Businesses Tract, %`,
+      greater_than_base,
+      population
+    )
+  ]
+  
+  msa_merged[]
+}
+```
+
+```{r grouping_by_msa_and_year}
+group_by_msa <- function(msa_merged) {
+  # Weighted metrics
+  msa_merged[,
+    `:=`(
+      weighted_new_businesses_growth =
+        as.numeric(`New Businesses Tract, %`) * population,
+      weighted_new_businesses_base =
+        as.numeric(`New Businesses Base, %`) * population
+    )
+  ]
+  
+  # Aggregate by MSA-Year
+  final_merged <- msa_merged[
+    ,
+    .(
+      num_tracts_greater_than_base =
+        sum(greater_than_base, na.rm = TRUE),
+      total_tracts = .N,
+      total_population = sum(population, na.rm = TRUE),
+      sum_weighted_tract_growth =
+        sum(weighted_new_businesses_growth, na.rm = TRUE),
+      sum_weighted_base_growth =
+        sum(weighted_new_businesses_base, na.rm = TRUE)
+    ),
+    by = .(
+      `CBSA.Code`,
+      `CBSA.Title`,
+      `Metropolitan/Micropolitan.Statistical.Area`,
+      Year
+    )
+  ]
+  
+  # Population in high-performing tracts
+  greater_than_base_pop <- msa_merged[
+    greater_than_base == TRUE,
+    .(
+      population_greater_than_base =
+        sum(population, na.rm = TRUE)
+    ),
+    by = .(
+      `CBSA.Code`,
+      `CBSA.Title`,
+      `Metropolitan/Micropolitan.Statistical.Area`,
+      Year
+    )
+  ]
+  
+  # Merge population_greater_than_base
+  final_merged <- greater_than_base_pop[
+    final_merged,
+    on = .(
+      `CBSA.Code`,
+      `CBSA.Title`,
+      `Metropolitan/Micropolitan.Statistical.Area`,
+      Year
+    )
+  ]
+  
+  # Compute shares and weighted averages
+  final_merged[,
+    population_share_greater_than_base :=
+      population_greater_than_base / total_population
+  ]
+  
+  final_merged[,
+    pop_weighted_avg_tract_growth :=
+      sum_weighted_tract_growth / total_population
+  ]
+  
+  # Drop intermediate weighted sums
+  final_merged[, c("sum_weighted_tract_growth",
+                   "sum_weighted_base_growth") := NULL]
+  
+  final_merged[]
+}
+
+```
+
+
+```{r main pipeline}
+igs_data <- load_and_clean_igs_data()
+
+pop_data <- fread(
+  "data/seer_tract_pops_2019_2023.csv",
+  colClasses = c(`full_tract_fips` = "character")
+)
+setnames(pop_data, "year", "merge_year")
+
+merged <- merge_igs_pop(igs_data, pop_data)
+
+msa_dt <- load_msa_data()
+
+msa_merged <- merge_msa_data(merged, msa_dt)
+fwrite(msa_merged, "data/merged_tract_data.csv")
+
+final_merged <- group_by_msa(msa_merged)
+# Fill NA with 0 as in your Python code
+final_merged[is.na(final_merged)] <- 0
+fwrite(final_merged, "data/merged_msa_data.csv")
+```
+
+#### End of will's code ####
 

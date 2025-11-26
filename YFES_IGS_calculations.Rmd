@@ -1,0 +1,92 @@
+---
+title: "YFES and IGS calculation"
+author: "Heartland Forward"
+date: "2025-11-25"
+output: html_document
+---
+
+#### calculating YFES/YFKI by census tract for >100 employees ####
+```{r}
+rm(list = ls())
+lodes_by_block <- fread("data/LODES_data_by_block.csv", colClasses = list(
+  "character" = "w_geocode",
+  "character" = "trct",
+  "character" = "cbsa"
+))
+
+lodes_by_block[,  `:=` (w_geocode = sprintf("%015s", w_geocode),
+                         trct = sprintf("%011s", trct),
+                        cbsa = sprintf("%005s", cbsa)
+                        )]
+
+# Summarize by tract, then filter to C000 (total employees) > 100
+lodes_by_tract <- lodes_by_block[, `:=` (tract_fips = substr(w_geocode, 1, 11),
+                                         county_fips = substr(w_geocode, 1, 5))][C000 >= 100]
+
+setnames(lodes_by_tract, old = c("C000", "CFA01", "CFA02", "CFA03", "CFA04", "CFA05"   #, "CD01", "CD02", "CD03", "CD04"
+                                 ),
+         new = c("total_jobs", "Employees_firms_0_1_yrs", "employees_firms_2_3_yrs", "employees_firms_4_5_yrs", "employees_firms_6_10_yrs", "employees_firms_11_plus_yrs"
+                 #, "employees_less_than_high_school", "employees_high_school_grad", "employees_some_college", "employees_bachelor_plus"
+                 ))
+
+```
+
+
+#### Calculating what percentage of people live in a tract with YFES \> nat'l average by region (Metro, Micro)
+```{r}
+tract_data <- fread("data/merged_tract_data.csv", colClasses = list(
+  "character" = "Census Tract FIPS code",
+  "character" = "CBSA.Code"
+))
+
+
+
+merged_tract_data <- lodes_by_tract[tract_data, on = .(tract_fips = `Census Tract FIPS code`, cbsaname = CBSA.Title, cbsa = CBSA.Code, year = Year), nomatch = NULL]
+
+
+yfes_by_tract <- merged_tract_data[
+  , .(
+      total_jobs = sum(total_jobs, na.rm = TRUE),
+      young_firm_employees = sum(
+        Employees_firms_0_1_yrs,
+        employees_firms_2_3_yrs,
+        employees_firms_4_5_yrs,
+        na.rm = TRUE
+      ),
+      yfes = sum(
+        Employees_firms_0_1_yrs,
+        employees_firms_2_3_yrs,
+        employees_firms_4_5_yrs,
+        na.rm = TRUE
+      ) / sum(total_jobs, na.rm = TRUE),
+      `Metropolitan/Micropolitan.Statistical.Area` = `Metropolitan/Micropolitan.Statistical.Area`,
+      population = population,
+      cbsaname,
+      cbsa
+  ),
+  by = .(tract_fips, year)
+]#[cbsaname != ""] #removing all census tracts that are not in a CBSA
+
+# National average YFES generally
+yfes_by_tract <- yfes_by_tract[, Natl_avg_yfes := sum(young_firm_employees, na.rm = TRUE) / sum(total_jobs, na.rm = TRUE)]
+
+yfes_by_tract <- yfes_by_tract[, Natl_yfes_by_cbsa_type := sum(young_firm_employees, na.rm = TRUE) / sum(total_jobs, na.rm = TRUE), by = .(`Metropolitan/Micropolitan.Statistical.Area`)]
+
+yfes_by_tract[, `:=` (above_natl_avg = fifelse(yfes > Natl_avg_yfes, 1, 0),
+                      above_natl_avg_by_cbsa_type = fifelse(yfes > Natl_yfes_by_cbsa_type, 1, 0))]
+
+pct_above_natl_average <- yfes_by_tract[,
+  .(
+    population_above_natl_avg = sum(population * above_natl_avg, na.rm = TRUE),
+    population_above_natl_avg_by_cbsa_type = sum(population * above_natl_avg_by_cbsa_type, na.rm = TRUE),
+    total_population = sum(population, na.rm = TRUE)
+  ),
+  by = .(`cbsaname`, year)
+]
+
+pct_above_natl_average[, `:=` (pct_above_natl_avg_simple = population_above_natl_avg / total_population,
+                                      pct_above_natl_avg_by_cbsa_type = population_above_natl_avg_by_cbsa_type / total_population)]
+```
+
+
+
