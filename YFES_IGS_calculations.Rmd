@@ -3,12 +3,21 @@ title: "YFES and IGS calculation"
 author: "Heartland Forward"
 date: "2025-11-25"
 output: html_document
+editor_options: 
+  chunk_output_type: console
 ---
 
 #### calculating YFES/YFKI by census tract for >100 employees ####
 ```{r}
 rm(list = ls())
-lodes_by_block <- fread("data/LODES_data_by_block.csv", colClasses = list(
+library(data.table)
+
+# Unzip data.zip into the data/ directory
+if (file.exists("data.zip")) {
+  unzip("data.zip", exdir = "data")
+}
+
+lodes_by_block <- fread("data/LODES_data_by_block.csv.zip", colClasses = list(
   "character" = "w_geocode",
   "character" = "trct",
   "character" = "cbsa"
@@ -76,7 +85,7 @@ yfes_by_tract[, `:=` (above_natl_avg = fifelse(yfes > Natl_avg_yfes, 1, 0),
                       above_natl_avg_by_cbsa_type = fifelse(yfes > Natl_yfes_by_cbsa_type, 1, 0))]
 
 pct_above_natl_average <- yfes_by_tract[,
-  .(
+  `:=` (
     population_above_natl_avg = sum(population * above_natl_avg, na.rm = TRUE),
     population_above_natl_avg_by_cbsa_type = sum(population * above_natl_avg_by_cbsa_type, na.rm = TRUE),
     total_population = sum(population, na.rm = TRUE)
@@ -86,6 +95,22 @@ pct_above_natl_average <- yfes_by_tract[,
 
 pct_above_natl_average[, `:=` (pct_above_natl_avg_simple = population_above_natl_avg / total_population,
                                       pct_above_natl_avg_by_cbsa_type = population_above_natl_avg_by_cbsa_type / total_population)]
+
+final_dat <- pct_above_natl_average[]
+
+fwrite(final_dat, "data/yfes_and_pct_above_natl_avg_by_tract.csv")
+
+# Zip the data/ folder back into data.zip
+if (dir.exists("data")) {
+  zip(zipfile = "data.zip", files = "data")
+}
+
+if (dir.exists("data")) {
+  if (file.exists("data.zip")) file.remove("data.zip")
+  zip(zipfile = "data.zip", files = "data")
+}
+
+
 ```
 
 
